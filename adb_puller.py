@@ -10,14 +10,18 @@ from time import time
 
 
 def read_arguments():
-    my_parser = ArgumentParser(description='Pull files with adb driver. If a file was already pulled the default '
-                                           'behaviour is to skip it.')
+    my_parser = ArgumentParser(description='Pull files with adb driver')
 
     # Add the arguments
     my_parser.add_argument('-d',
                            '--dest',
                            type=str,
                            help='The folder in which to save the items pulled')
+
+    my_parser.add_argument('--skip',
+                           type=str,
+                           nargs='*',
+                           help='Skip the files provided')
 
     my_parser.add_argument('--dry-run',
                            action='store_true',
@@ -34,11 +38,10 @@ def read_arguments():
                            default=True,
                            help='Use "adb pull" with "-a" flag to keep metadata like last modified time ecc')
 
-    my_parser.add_argument('-p',
-                           '--already_pulled',
+    my_parser.add_argument('--skip-from-file',
                            type=str,
                            nargs='*',
-                           help='Optional, file containing already pulled items to skip')
+                           help='Optional, file containing items to skip')
 
     my_group = my_parser.add_mutually_exclusive_group(required=True)
 
@@ -62,10 +65,10 @@ def read_arguments():
             if not os.path.isfile(i):
                 sys.exit(f"The input file doesn't exists: '{i}'")
 
-    if args.already_pulled:
-        for i in args.already_pulled:
+    if args.skip_from_file:
+        for i in args.skip_from_file:
             if not os.path.isfile(i):
-                sys.exit(f"The already_pulled file doesn't exists: '{i}'")
+                sys.exit(f"The skip_from_file file doesn't exists: '{i}'")
 
     args.dest = Path(args.dest).resolve()
     if not args.dest.is_dir():
@@ -234,12 +237,15 @@ if __name__ == '__main__':
 
     args = read_arguments()
 
-    already_pulled = list()
-    if args.already_pulled:
-        for i in args.already_pulled:
-            already_pulled.extend(read_filelist(i))
+    skip_files = list()
+    if args.skip_from_file:
+        for i in args.skip_from_file:
+            skip_files.extend(read_filelist(i))
 
-    already_pulled = set(already_pulled)
+    if args.skip:
+        skip_files.extend(args.skip)
+
+    skip_files = set(skip_files)
 
     # Read file lists from the inputs if given
     files_path = list()
@@ -247,7 +253,7 @@ if __name__ == '__main__':
     if args.input:
         for i in args.input:
             filelist = read_filelist(i)
-            filelist = remove_duplicates(filelist, already_pulled)
+            filelist = remove_duplicates(filelist, skip_files)
 
             files_src_dest_temp = get_file_destinations(filelist, args.dest, skip_existing=args.skip_existing)
             files_src_dest.extend(files_src_dest_temp)
@@ -255,7 +261,7 @@ if __name__ == '__main__':
     else:
         for src in args.source:
             filelist = get_file_list(src)
-            filelist = remove_duplicates(filelist, already_pulled)
+            filelist = remove_duplicates(filelist, skip_files)
             # write_output(filelist, f"{Path(src).name}.txt")
 
             files_src_dest_temp = get_file_destinations(filelist, args.dest, src,
@@ -277,7 +283,6 @@ if __name__ == '__main__':
         from tqdm import tqdm
     except ImportError:
         tqdm = None
-
 
     start = time()
 
@@ -316,7 +321,7 @@ if __name__ == '__main__':
             command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
             command = Command(command)
 
-            if not command.run(timeout=60):
+            if not command.run(timeout=120):
                 print(f"failed {src}")
                 append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
             else:
