@@ -1,11 +1,12 @@
 from pathlib import Path, PurePosixPath
-from tqdm import tqdm
 from argparse import ArgumentParser, BooleanOptionalAction
 import os
 import sys
 import subprocess
 import threading
 import shlex
+from datetime import datetime
+from time import time
 
 
 def read_arguments():
@@ -255,7 +256,7 @@ if __name__ == '__main__':
         for src in args.source:
             filelist = get_file_list(src)
             filelist = remove_duplicates(filelist, already_pulled)
-            write_output(filelist, f"{Path(src).name}.txt")
+            # write_output(filelist, f"{Path(src).name}.txt")
 
             files_src_dest_temp = get_file_destinations(filelist, args.dest, src,
                                                         skip_existing=args.skip_existing)
@@ -272,16 +273,65 @@ if __name__ == '__main__':
         print_iterable(files_src_dest)
         sys.exit()
 
-    for (src, dest) in tqdm(files_src_dest):
-        keep_metadata_flag = '-a'
-        if not args.keep_metadata:
-            keep_metadata_flag = ''
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = None
 
-        command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
-        command = Command(command)
 
-        if not command.run(timeout=60):
-            print(f"failed {src}")
-            append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
-        else:
-            append_to_output(src, DONE_OUTPUT, encoding=ENCODING)
+    start = time()
+
+    if tqdm:
+        current_time = datetime.now().strftime("%H:%M:%S")
+        print(f"{current_time} -> Pulling {len(files_src_dest)} files... it may take some time...")
+
+        for (src, dest) in tqdm(files_src_dest):
+            keep_metadata_flag = '-a'
+            if not args.keep_metadata:
+                keep_metadata_flag = ''
+
+            command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
+            command = Command(command)
+
+            if not command.run(timeout=60):
+                print(f"failed {src}")
+                append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
+            else:
+                append_to_output(src, DONE_OUTPUT, encoding=ENCODING)
+
+    else:
+        current_time = datetime.now().strftime("%H:%M:%S")
+        print(f"You don't have tqdm installed so you won't see any progress bar.\n"
+              f"{current_time} -> Pulling {len(files_src_dest)} files... it may take some time...")
+
+        from math import ceil
+
+        chunk_10 = ceil(len(files_src_dest) / 10)
+
+        for index, (src, dest) in enumerate(files_src_dest):
+            keep_metadata_flag = '-a'
+            if not args.keep_metadata:
+                keep_metadata_flag = ''
+
+            command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
+            command = Command(command)
+
+            if not command.run(timeout=60):
+                print(f"failed {src}")
+                append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
+            else:
+                append_to_output(src, DONE_OUTPUT, encoding=ENCODING)
+
+            files_pulled = index + 1
+            if files_pulled % chunk_10 == 0:
+                percentage = (files_pulled / chunk_10) * 10
+                if percentage == 100:
+                    # Skip 100% because it may be 100 due to rounding error but it actually is less than the total
+                    continue
+                current_time = datetime.now().strftime("%H:%M:%S")
+                print(f"{current_time} -> #{percentage}%  items pulled: {files_pulled}")
+
+        current_time = datetime.now().strftime("%H:%M:%S")
+        print(f"{current_time} -> #100%  items pulled: {files_pulled}")
+
+    print(f"Pulling done in {time() - start:.3f} seconds. Failed pulls are saved to 'failed.txt', if any.")
