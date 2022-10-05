@@ -40,7 +40,7 @@ $ python ./adb_puller.py -i 'files_to_pull.txt' -d '/home/abc' --dry-run
 ```
 
 ### Skip files
-If you want to skip some items you can supply them in a file with `--skip-from-file` flag. Conveniently, `adb_puller.py` saves in `done.txt` every file it pulls so you can, for example, pull some files in a folder and stop the process, then redo it in another folder and skip the files already pulled. If you just want to skip some files you can use the `--skip` flag: </br>
+If you want to skip some items you can supply them in a file with `--skip-from-file` flag. Conveniently, `adb_puller.py` saves in `done.txt` every file it pulls, so you can, for example, pull some files in a folder and stop the process, then redo it in another folder and skip the files already pulled. If you just want to skip some files you can use the `--skip` flag: </br>
 `python ./adb_puller.py -s '/sdcard/DCIM' -d 'home/abc' --skip-from-file 'to_skip.txt' --skip '/sdcard/DCIM/to_skip.jpg' `
 
 The command above will skip `/sdcard/DCIM/to_skip.jpg` and all items contained inside `to_skip.txt`.

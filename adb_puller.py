@@ -45,11 +45,13 @@ def read_arguments():
                            default=False,
                            help='Do not pull anything but print the files which will be pulled and their destination')
 
+    # noinspection PyTypeChecker
     my_parser.add_argument('--skip-existing',
                            action=BooleanOptionalAction,
                            default=True,
                            help='Skip already existing items')
 
+    # noinspection PyTypeChecker
     my_parser.add_argument('--keep-metadata',
                            action=BooleanOptionalAction,
                            default=True,
@@ -94,7 +96,7 @@ def read_arguments():
     return args
 
 
-def get_file_list(root):
+def get_file_list_from_adb(root):
     print(f'Building file list of "{root}"')
     process = subprocess.run(shlex.split(f'adb shell ls -R "{root}"', posix=False), stdout=subprocess.PIPE,
                              universal_newlines=True, encoding='utf-8')
@@ -128,8 +130,7 @@ def get_file_list(root):
             except ValueError:
                 pass
 
-        elif line.strip() == '':
-            # Empty line
+        elif line.strip() == '':  # Empty line
             pass
         else:
             file_name = line.strip()
@@ -140,7 +141,7 @@ def get_file_list(root):
     return file_paths
 
 
-def get_file_destinations(files, main_dest, src_root=None, skip_existing=True):
+def get_file_destinations(files, main_dest, root_src=None, skip_existing=True):
     # Get path of src relative to src_root by removing it from the path
     # compute destination by joining the src_relative to the main_destination
 
@@ -148,14 +149,14 @@ def get_file_destinations(files, main_dest, src_root=None, skip_existing=True):
 
     src_dest = list()
     for src in files:
-        if src_root:
+        if root_src:
             try:
                 # Get the file_path relative to the parent of src_root, which is the folder that we searched
                 # for the files to pull. In this way if I want to pull "/sdcard/DCIM" I will pull it in "./DCIM"
                 # At the same time
-                rel_src = PurePosixPath(src).relative_to(PurePosixPath(src_root).parent)
+                rel_src = PurePosixPath(src).relative_to(PurePosixPath(root_src).parent)
             except ValueError as err:
-                sys.exit(f"{err} \nsrc_root '{src_root}' passed to the function get_file_destination should work")
+                sys.exit(f"{err} \nsrc_root '{root_src}' passed to the function get_file_destination should work")
 
         else:
             # This branch is used when the files are not read from adb but from a list in a file.
@@ -233,6 +234,105 @@ def filter_files(file_list, filters):
     return new_file_list
 
 
+def get_files_paths_and_destinations(args):
+    """
+    Find which files need to be pulled and their destinations
+    """
+
+    # Files to skip
+    skip_files = list()
+    if args.skip_from_file:
+        for i in args.skip_from_file:
+            skip_files.extend(read_filelist(i))
+
+    if args.skip:
+        skip_files.extend(args.skip)
+
+    skip_files = set(skip_files)
+
+    files_src_dest = list()
+    if args.input:
+        # Read file lists from the inputs
+        for i in args.input:
+            filelist = read_filelist(i)
+            filelist = remove_duplicates(filelist, skip_files)
+            if args.filter:
+                filelist = filter_files(filelist, args.filter)
+
+            files_src_dest_temp = get_file_destinations(filelist, args.dest,
+                                                        root_src=None, skip_existing=args.skip_existing)
+            files_src_dest.extend(files_src_dest_temp)
+
+    else:
+        # Get file list from the android folders
+        for src in args.source:
+            filelist = get_file_list_from_adb(src)
+            filelist = remove_duplicates(filelist, skip_files)
+            if args.filter:
+                filelist = filter_files(filelist, args.filter)
+
+            files_src_dest_temp = get_file_destinations(filelist, args.dest,
+                                                        root_src=src, skip_existing=args.skip_existing)
+            files_src_dest.extend(files_src_dest_temp)
+
+    return files_src_dest
+
+
+def pull_with_progressbar(files_src_dest, args):
+    current_time = datetime.now().strftime("%H:%M:%S")
+    print(f"{current_time} -> Pulling {len(files_src_dest)} files... it may take some time...")
+
+    for (src, dest) in tqdm(files_src_dest):
+        keep_metadata_flag = '-a'
+        if not args.keep_metadata:
+            keep_metadata_flag = ''
+
+        command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
+        command = Command(command)
+
+        if not command.run(timeout=args.timeout):
+            append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
+        else:
+            append_to_output(src, DONE_OUTPUT, encoding=ENCODING)
+
+
+def pull_without_progressbar(files_src_dest, args):
+    from math import ceil
+
+    current_time = datetime.now().strftime("%H:%M:%S")
+    print(f"You don't have tqdm installed so you won't see any progress bar.\n"
+          f"{current_time} -> Pulling {len(files_src_dest)} files... it may take some time...")
+
+    chunk_10 = ceil(len(files_src_dest) / 10)
+
+    for index, (src, dest) in enumerate(files_src_dest):
+        keep_metadata_flag = '-a'
+        if not args.keep_metadata:
+            keep_metadata_flag = ''
+
+        command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
+        command = Command(command)
+
+        if not command.run(timeout=args.timeout):
+            append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
+        else:
+            append_to_output(src, DONE_OUTPUT, encoding=ENCODING)
+
+        files_pulled = index + 1
+        if files_pulled % chunk_10 == 0:
+            percentage = (files_pulled / chunk_10) * 10
+
+            # Skip 100% because it may be 100 due to rounding error, but it actually is less than the total
+            if percentage == 100:
+                continue
+
+            current_time = datetime.now().strftime("%H:%M:%S")
+            print(f"{current_time} -> #{percentage}%  items pulled: {files_pulled}")
+
+    current_time = datetime.now().strftime("%H:%M:%S")
+    print(f"{current_time} -> #100%  items pulled: {files_pulled}")
+
+
 class Command:
     """
     This class allow to execute a command and terminate it and its children it if it exceeds a specified timeout
@@ -306,46 +406,12 @@ class Command:
 
 if __name__ == '__main__':
     FAILED_OUTPUT = 'failed.txt'
-    DONE_OUTPUT = 'pulled.txt'
+    DONE_OUTPUT = 'done.txt'
     ENCODING = 'utf-8'
 
     args = read_arguments()
 
-    skip_files = list()
-    if args.skip_from_file:
-        for i in args.skip_from_file:
-            skip_files.extend(read_filelist(i))
-
-    if args.skip:
-        skip_files.extend(args.skip)
-
-    skip_files = set(skip_files)
-
-    # Read file lists from the inputs if given
-    files_path = list()
-    files_src_dest = list()
-    if args.input:
-        for i in args.input:
-            filelist = read_filelist(i)
-            filelist = remove_duplicates(filelist, skip_files)
-            if args.filter:
-                filelist = filter_files(filelist, args.filter)
-
-            files_src_dest_temp = get_file_destinations(filelist, args.dest, skip_existing=args.skip_existing)
-            files_src_dest.extend(files_src_dest_temp)
-
-    else:
-        for src in args.source:
-            filelist = get_file_list(src)
-            filelist = remove_duplicates(filelist, skip_files)
-            if args.filter:
-                filelist = filter_files(filelist, args.filter)
-
-            files_src_dest_temp = get_file_destinations(filelist, args.dest, src,
-                                                        skip_existing=args.skip_existing)
-            files_src_dest.extend(files_src_dest_temp)
-
-    failed = list()
+    files_src_dest = get_files_paths_and_destinations(args)
 
     if not files_src_dest:
         print(f"No files to pull! They were probably already pulled. To force the pulling and overwrite the existing "
@@ -364,54 +430,8 @@ if __name__ == '__main__':
     start = time()
 
     if tqdm:
-        current_time = datetime.now().strftime("%H:%M:%S")
-        print(f"{current_time} -> Pulling {len(files_src_dest)} files... it may take some time...")
-
-        for (src, dest) in tqdm(files_src_dest):
-            keep_metadata_flag = '-a'
-            if not args.keep_metadata:
-                keep_metadata_flag = ''
-
-            command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
-            command = Command(command)
-
-            if not command.run(timeout=args.timeout):
-                append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
-            else:
-                append_to_output(src, DONE_OUTPUT, encoding=ENCODING)
-
+        pull_with_progressbar(files_src_dest, args)
     else:
-        current_time = datetime.now().strftime("%H:%M:%S")
-        print(f"You don't have tqdm installed so you won't see any progress bar.\n"
-              f"{current_time} -> Pulling {len(files_src_dest)} files... it may take some time...")
-
-        from math import ceil
-
-        chunk_10 = ceil(len(files_src_dest) / 10)
-
-        for index, (src, dest) in enumerate(files_src_dest):
-            keep_metadata_flag = '-a'
-            if not args.keep_metadata:
-                keep_metadata_flag = ''
-
-            command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
-            command = Command(command)
-
-            if not command.run(timeout=args.timeout):
-                append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
-            else:
-                append_to_output(src, DONE_OUTPUT, encoding=ENCODING)
-
-            files_pulled = index + 1
-            if files_pulled % chunk_10 == 0:
-                percentage = (files_pulled / chunk_10) * 10
-                if percentage == 100:
-                    # Skip 100% because it may be 100 due to rounding error but it actually is less than the total
-                    continue
-                current_time = datetime.now().strftime("%H:%M:%S")
-                print(f"{current_time} -> #{percentage}%  items pulled: {files_pulled}")
-
-        current_time = datetime.now().strftime("%H:%M:%S")
-        print(f"{current_time} -> #100%  items pulled: {files_pulled}")
+        pull_without_progressbar(files_src_dest, args)
 
     print(f"Pulling done in {time() - start:.3f} seconds. Failed pulls are saved to 'failed.txt', if any.")
