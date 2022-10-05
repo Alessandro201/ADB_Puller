@@ -1,15 +1,13 @@
-from pathlib import Path, PurePosixPath
-from argparse import ArgumentParser, BooleanOptionalAction
 import os
-import sys
-import subprocess
-import threading
 import shlex
+import subprocess
+import sys
+import threading
+from argparse import ArgumentParser, BooleanOptionalAction
 from datetime import datetime
+from pathlib import Path, PurePosixPath
 from time import time
-import os
-import signal
-from time import monotonic as timer
+
 import psutil
 
 
@@ -32,7 +30,7 @@ def read_arguments():
                            type=int,
                            action='store',
                            default=120,
-                           help='Timeout after which to skip failed files')
+                           help='Timeout after which to skip failed files. (default: %(default)d)')
 
     my_parser.add_argument('-f',
                            '--filter',
@@ -288,9 +286,8 @@ def pull_with_progressbar(files_src_dest, args):
             keep_metadata_flag = ''
 
         command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
-        command = Command(command)
 
-        if not command.run(timeout=args.timeout):
+        if not run_command(command, timeout=args.timeout):
             append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
         else:
             append_to_output(src, DONE_OUTPUT, encoding=ENCODING)
@@ -311,9 +308,8 @@ def pull_without_progressbar(files_src_dest, args):
             keep_metadata_flag = ''
 
         command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
-        command = Command(command)
 
-        if not command.run(timeout=args.timeout):
+        if not run_command(command, timeout=args.timeout):
             append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
         else:
             append_to_output(src, DONE_OUTPUT, encoding=ENCODING)
@@ -333,75 +329,25 @@ def pull_without_progressbar(files_src_dest, args):
     print(f"{current_time} -> #100%  items pulled: {files_pulled}")
 
 
-class Command:
-    """
-    This class allow to execute a command and terminate it and its children it if it exceeds a specified timeout
-    """
+def run_command(cmd, timeout):
+    try:
+        # Run the command and after a timeout expires kill the process. This works with adb.exe because it does not
+        # spawn child processes. In case self.cmd does spawn other processes you would need to kill the whole
+        # process tree. You can check by adding "shell=True" to subprocess.run which will spawn the command
+        # into its own process, and thus will not be killed after the timeout expires.
 
-    def __init__(self, cmd):
-        self.cmd = cmd
-        self.process = None
+        subprocess.run(cmd, capture_output=True, timeout=timeout, check=True)
 
-    def run(self, timeout):
-        """
-        Create a separate thread to run the subprocess command. In this way I can keep track of the time it takes to
-        execute, and if it exceeds a specified timeout then I terminate the whole process tree to be sure that every
-        child process started will be closed. If terminate doesn't work it kills the process tree.
-        """
+    except subprocess.TimeoutExpired:
+        print(f"\nTimeoutExpired on {cmd}")
+        print(f"Process tree killed.")
+        return False
 
-        def target():
-            self.process = subprocess.Popen(self.cmd, shell=True, stdout=subprocess.PIPE)
-            self.process.communicate()
+    except subprocess.CalledProcessError as err:
+        print(f"Error running {err.cmd} \nReturncode: {err.returncode} - Error: {err.stderr}")
+        return False
 
-        thread = threading.Thread(target=target)
-        thread.start()
-        thread.join(timeout=timeout)
-
-        if thread.is_alive():
-            print(f"\nTimeoutExpired on {self.cmd}")
-            self._terminate_proc_tree(self.process.pid)
-            thread.join()
-
-            if thread.is_alive():
-                print(f"Process tree did not terminate correctly. Killing it forcefully...")
-                self._terminate_proc_tree(self.process.pid)
-                thread.join()
-                print(f"Process tree killed. Return Code: {self.process.returncode}")
-
-            else:
-                print(f"Process tree terminated. Return Code: {self.process.returncode}")
-
-            return False
-
-        return True
-
-    @staticmethod
-    def _kill_proc_tree(pid, including_parent=True):
-        parent = psutil.Process(pid)
-        children = parent.children(recursive=True)
-        for child in children:
-            child.kill()
-        gone, still_alive = psutil.wait_procs(children, timeout=5)
-        if including_parent:
-            try:
-                parent.kill()
-                parent.wait(5)
-            except psutil.NoSuchProcess:
-                pass
-
-    @staticmethod
-    def _terminate_proc_tree(pid, including_parent=True):
-        parent = psutil.Process(pid)
-        children = parent.children(recursive=True)
-        for child in children:
-            child.terminate()
-        gone, still_alive = psutil.wait_procs(children, timeout=5)
-        if including_parent:
-            try:
-                parent.terminate()
-                parent.wait(5)
-            except psutil.NoSuchProcess:
-                pass
+    return True
 
 
 if __name__ == '__main__':
