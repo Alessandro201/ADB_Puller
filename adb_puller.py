@@ -7,6 +7,10 @@ import threading
 import shlex
 from datetime import datetime
 from time import time
+import os
+import signal
+from time import monotonic as timer
+import psutil
 
 
 def read_arguments():
@@ -22,6 +26,19 @@ def read_arguments():
                            type=str,
                            nargs='*',
                            help='Skip the files provided')
+
+    my_parser.add_argument('-t',
+                           '--timeout',
+                           type=int,
+                           action='store',
+                           default=120,
+                           help='Timeout after which to skip failed files')
+
+    my_parser.add_argument('-f',
+                           '--filter',
+                           action='store',
+                           nargs='*',
+                           help='Choose which file to copy or not. Use regex.')
 
     my_parser.add_argument('--dry-run',
                            action='store_true',
@@ -204,9 +221,21 @@ def remove_duplicates(file_list, duplicates: set):
     return filtered_file_list
 
 
+def filter_files(file_list, filters):
+    import re
+    new_file_list = list()
+
+    for file in file_list:
+        for filt in filters:
+            if re.search(filt, file):
+                new_file_list.append(file)
+
+    return new_file_list
+
+
 class Command:
     """
-    This class should allow the script to skip a file if it takes more that timeout seconds
+    This class allow to execute a command and terminate it and its children it if it exceeds a specified timeout
     """
 
     def __init__(self, cmd):
@@ -214,20 +243,65 @@ class Command:
         self.process = None
 
     def run(self, timeout):
+        """
+        Create a separate thread to run the subprocess command. In this way I can keep track of the time it takes to
+        execute, and if it exceeds a specified timeout then I terminate the whole process tree to be sure that every
+        child process started will be closed. If terminate doesn't work it kills the process tree.
+        """
+
         def target():
             self.process = subprocess.Popen(self.cmd, shell=True, stdout=subprocess.PIPE)
             self.process.communicate()
 
         thread = threading.Thread(target=target)
         thread.start()
+        thread.join(timeout=timeout)
 
-        thread.join(timeout)
         if thread.is_alive():
-            self.process.terminate()
+            print(f"\nTimeoutExpired on {self.cmd}")
+            self._terminate_proc_tree(self.process.pid)
             thread.join()
-            print(f"Timeout Error: {self.cmd} \nReturn Code: {self.process.returncode}")
+
+            if thread.is_alive():
+                print(f"Process tree did not terminate correctly. Killing it forcefully...")
+                self._terminate_proc_tree(self.process.pid)
+                thread.join()
+                print(f"Process tree killed. Return Code: {self.process.returncode}")
+
+            else:
+                print(f"Process tree terminated. Return Code: {self.process.returncode}")
+
             return False
+
         return True
+
+    @staticmethod
+    def _kill_proc_tree(pid, including_parent=True):
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            child.kill()
+        gone, still_alive = psutil.wait_procs(children, timeout=5)
+        if including_parent:
+            try:
+                parent.kill()
+                parent.wait(5)
+            except psutil.NoSuchProcess:
+                pass
+
+    @staticmethod
+    def _terminate_proc_tree(pid, including_parent=True):
+        parent = psutil.Process(pid)
+        children = parent.children(recursive=True)
+        for child in children:
+            child.terminate()
+        gone, still_alive = psutil.wait_procs(children, timeout=5)
+        if including_parent:
+            try:
+                parent.terminate()
+                parent.wait(5)
+            except psutil.NoSuchProcess:
+                pass
 
 
 if __name__ == '__main__':
@@ -254,6 +328,8 @@ if __name__ == '__main__':
         for i in args.input:
             filelist = read_filelist(i)
             filelist = remove_duplicates(filelist, skip_files)
+            if args.filter:
+                filelist = filter_files(filelist, args.filter)
 
             files_src_dest_temp = get_file_destinations(filelist, args.dest, skip_existing=args.skip_existing)
             files_src_dest.extend(files_src_dest_temp)
@@ -262,7 +338,8 @@ if __name__ == '__main__':
         for src in args.source:
             filelist = get_file_list(src)
             filelist = remove_duplicates(filelist, skip_files)
-            # write_output(filelist, f"{Path(src).name}.txt")
+            if args.filter:
+                filelist = filter_files(filelist, args.filter)
 
             files_src_dest_temp = get_file_destinations(filelist, args.dest, src,
                                                         skip_existing=args.skip_existing)
@@ -298,8 +375,7 @@ if __name__ == '__main__':
             command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
             command = Command(command)
 
-            if not command.run(timeout=60):
-                print(f"failed {src}")
+            if not command.run(timeout=args.timeout):
                 append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
             else:
                 append_to_output(src, DONE_OUTPUT, encoding=ENCODING)
@@ -321,8 +397,7 @@ if __name__ == '__main__':
             command = f'adb pull {keep_metadata_flag} "{src}" "{dest}"'
             command = Command(command)
 
-            if not command.run(timeout=120):
-                print(f"failed {src}")
+            if not command.run(timeout=args.timeout):
                 append_to_output(src, FAILED_OUTPUT, encoding=ENCODING)
             else:
                 append_to_output(src, DONE_OUTPUT, encoding=ENCODING)
