@@ -95,44 +95,54 @@ def read_arguments():
 
 
 def get_file_list_from_adb(root):
+    """
+    Use "ls -R" to find the files of a folder
+    """
+
     print(f'Building file list of "{root}"')
     process = subprocess.run(shlex.split(f'adb shell ls -R "{root}"', posix=False), stdout=subprocess.PIPE,
                              universal_newlines=True, encoding='utf-8')
-    out = process.stdout
+    output_lines = process.stdout.split('\n')
+
+    # Filter out empty lines
+    output_lines = list(filter(None, output_lines))
+
+    # If the output of ls is only a line, and it's the root it means that the path is a file
+    if len(output_lines) == 1 and root == output_lines[0].strip():
+        print(f"{root} is a file")
+        file_paths = [root]
+        return file_paths
 
     file_paths = list()
-
-    parent_path = ''
-    for line in out.split('\n'):
-        if not line:
-            continue
+    current_parent_path = ''
+    for line in output_lines:
+        """
+        "ls -R" shows folder and files alike in the output, but each time it shows the contents of a folder
+        it prints the parent one. I can add all folders and files to files_path, and everytime adb prints a parent folder
+        I can remove it from file_paths.
+        
+        Output example:
+        /sdcard/main_folder:
+        folder1
+        file1
+        /sdcard/main_folder/folder1:
+        file2
+        
+        I can then remove folder1 from filelist
+        """
 
         if line[0] == '/':
             # This line contains the parent path
-            parent_path = line.strip().strip(':')
+            current_parent_path = line.strip().strip(':')
 
-            # adb shows folder and files alike in the output of ls, but each time it shows the contents of a folder
-            # it prints the parent one. I can add all folders and files to files_path, and everytime adb prints a folder
-            # before printing its content I can remove it from file_paths.
-
-            # Output example:
-            # /sdcard/main_folder:
-            # folder1
-            # file1
-            # /sdcard/main_folder/folder1:
-            # file2
-            #
-            # I can then remove folder1 from filelist
             try:
-                file_paths.remove(parent_path)
+                file_paths.remove(current_parent_path)
             except ValueError:
                 pass
 
-        elif line.strip() == '':  # Empty line
-            pass
         else:
             file_name = line.strip()
-            file_path = str(PurePosixPath(parent_path, file_name))
+            file_path = str(PurePosixPath(current_parent_path, file_name))
 
             file_paths.append(file_path)
 
@@ -222,6 +232,7 @@ def remove_duplicates(file_list, duplicates: set):
 
 def filter_files(file_list, filters):
     import re
+
     new_file_list = list()
 
     for file in file_list:
@@ -266,6 +277,7 @@ def get_files_paths_and_destinations(args):
         for src in args.source:
             filelist = get_file_list_from_adb(src)
             filelist = remove_duplicates(filelist, skip_files)
+
             if args.filter:
                 filelist = filter_files(filelist, args.filter)
 
@@ -344,7 +356,7 @@ def run_command(cmd, timeout):
         return False
 
     except subprocess.CalledProcessError as err:
-        print(f"Error running {err.cmd} \nReturncode: {err.returncode} - Error: {err.stderr}")
+        print(f"Error running {err.cmd} \nReturncode: {err.returncode} - Error: {err.stderr.decode('utf-8')}")
         return False
 
     return True
